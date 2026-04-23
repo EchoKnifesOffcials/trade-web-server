@@ -1,125 +1,136 @@
-const TradeModel = require('../models/Trade');
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
 
-const tradeController = {
-  // Create a new trade record
-  async recordTrade(req, res) {
-    try {
-      const {
-        userId,
-        userEmail,
-        itemId,
-        itemName,
-        quantity,
-        price,
-        totalAmount,
-        paymentMethod,
-        transactionId
-      } = req.body;
+const app = express();
+const PORT = process.env.PORT || 3001;
 
-      // Validation
-      if (!userId || !itemId || !quantity || !totalAmount) {
-        return res.status(400).json({
-          error: 'Missing required fields',
-          required: ['userId', 'itemId', 'quantity', 'totalAmount']
-        });
-      }
+// Middleware
+app.use(cors());
+app.use(express.json());
 
-      const tradeData = {
-        userId,
-        userEmail: userEmail || null,
-        itemId,
-        itemName: itemName || 'Unknown Item',
-        quantity,
-        price: price || totalAmount / quantity,
-        totalAmount,
-        paymentMethod: paymentMethod || 'unknown',
-        transactionId: transactionId || `TXN_${Date.now()}`,
-        source: 'echoknives.shop'
-      };
+// In-memory storage
+const trades = [];
 
-      const newTrade = TradeModel.createTrade(tradeData);
-      
-      res.status(201).json({
-        success: true,
-        message: 'Trade recorded successfully',
-        trade: newTrade
-      });
-    } catch (error) {
-      console.error('Error recording trade:', error);
-      res.status(500).json({
-        error: 'Internal server error',
-        message: error.message
-      });
+// Roblox API functions
+async function getRobloxUser(username) {
+  try {
+    // Search for user
+    const searchRes = await axios.get(`https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(username)}&limit=1`);
+    
+    if (!searchRes.data.data || searchRes.data.data.length === 0) {
+      throw new Error('Roblox user not found');
     }
-  },
-
-  // Get all trades
-  async getAllTrades(req, res) {
-    try {
-      const trades = TradeModel.getAllTrades();
-      res.status(200).json({
-        success: true,
-        count: trades.length,
-        trades
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  },
-
-  // Get trade by ID
-  async getTradeById(req, res) {
-    try {
-      const { id } = req.params;
-      const trade = TradeModel.getTradeById(id);
-      
-      if (!trade) {
-        return res.status(404).json({ error: 'Trade not found' });
-      }
-      
-      res.status(200).json({ success: true, trade });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  },
-
-  // Get trades by user
-  async getTradesByUser(req, res) {
-    try {
-      const { userId } = req.params;
-      const trades = TradeModel.getTradesByUser(userId);
-      
-      res.status(200).json({
-        success: true,
-        count: trades.length,
-        trades
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  },
-
-  // Update trade status
-  async updateTradeStatus(req, res) {
-    try {
-      const { id } = req.params;
-      const { status } = req.body;
-      
-      const updatedTrade = TradeModel.updateTradeStatus(id, status);
-      
-      if (!updatedTrade) {
-        return res.status(404).json({ error: 'Trade not found' });
-      }
-      
-      res.status(200).json({
-        success: true,
-        message: 'Trade status updated',
-        trade: updatedTrade
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
+    
+    const user = searchRes.data.data[0];
+    const userId = user.id;
+    
+    // Get display name
+    const displayRes = await axios.get(`https://users.roblox.com/v1/users/${userId}`);
+    
+    // Get avatar
+    const avatarRes = await axios.get(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`);
+    
+    return {
+      robloxId: userId,
+      username: user.name,
+      displayName: displayRes.data.displayName || user.name,
+      avatarUrl: avatarRes.data.data[0]?.imageUrl || null,
+      profileUrl: `https://www.roblox.com/users/${userId}/profile`
+    };
+  } catch (error) {
+    throw new Error(`Failed to fetch Roblox user: ${error.message}`);
   }
-};
+}
 
-module.exports = tradeController;
+// API Routes
+
+// Create a trade request
+app.post('/api/trades', async (req, res) => {
+  try {
+    const { requesterId, requesterName, receiverRobloxUsername, itemsOffered, itemsRequested, message } = req.body;
+    
+    // Validate
+    if (!requesterId || !receiverRobloxUsername || !itemsOffered || !itemsRequested) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Fetch Roblox info
+    let receiverInfo;
+    try {
+      receiverInfo = await getRobloxUser(receiverRobloxUsername);
+    } catch (error) {
+      return res.status(404).json({ error: error.message });
+    }
+    
+    // Create trade
+    const trade = {
+      id: Date.now().toString(),
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      requesterId,
+      requesterName: requesterName || 'Anonymous',
+      receiverRobloxUsername,
+      receiverInfo,
+      itemsOffered,
+      itemsRequested,
+      message: message || ''
+    };
+    
+    trades.push(trade);
+    res.status(201).json({ success: true, trade });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all active trades (for global display)
+app.get('/api/trades', (req, res) => {
+  const activeTrades = trades.filter(t => t.status === 'pending');
+  activeTrades.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json({ success: true, trades: activeTrades });
+});
+
+// Get user's trades
+app.get('/api/trades/user/:userId', (req, res) => {
+  const userTrades = trades.filter(t => 
+    t.requesterId === req.params.userId || 
+    t.receiverInfo?.robloxId?.toString() === req.params.userId
+  );
+  res.json({ success: true, trades: userTrades });
+});
+
+// Update trade status (accept/decline)
+app.put('/api/trades/:id', (req, res) => {
+  const { status, userId } = req.body;
+  const trade = trades.find(t => t.id === req.params.id);
+  
+  if (!trade) return res.status(404).json({ error: 'Trade not found' });
+  if (trade.status !== 'pending') return res.status(400).json({ error: 'Trade already processed' });
+  
+  trade.status = status;
+  trade.updatedAt = new Date().toISOString();
+  res.json({ success: true, trade });
+});
+
+// Delete trade
+app.delete('/api/trades/:id', (req, res) => {
+  const { userId } = req.body;
+  const index = trades.findIndex(t => t.id === req.params.id);
+  
+  if (index === -1) return res.status(404).json({ error: 'Trade not found' });
+  if (trades[index].requesterId !== userId) return res.status(403).json({ error: 'Not authorized' });
+  
+  trades.splice(index, 1);
+  res.json({ success: true });
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', tradesCount: trades.length });
+});
+
+app.listen(PORT, () => {
+  console.log(`Trade service running on port ${PORT}`);
+});
